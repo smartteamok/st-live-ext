@@ -16,9 +16,7 @@
 
   if (!Scratch) return;
 
-  // Provide in-extension translations for immediate UX.
-  // TurboWarp commonly uses es-419 for Latin American Spanish.
-  const translations = {
+  const STRINGS = {
     en: {
       "SmartTEAM Live": "SmartTEAM Live",
       room: "room",
@@ -31,46 +29,52 @@
       disconnect: "disconnect",
     },
     es: {
-      "SmartTEAM Live": "SmartTEAM Live",
+      "SmartTEAM Live": "SmartTEAM En Vivo",
       room: "sala",
       "connected?": "¿conectado?",
       class: "clase",
       confidence: "confianza",
       subscribers: "suscriptores",
-      "set room to [ROOM]": "establecer sala a [ROOM]",
-      reconnect: "reconectar",
-      disconnect: "desconectar",
-    },
-    "es-419": {
-      "SmartTEAM Live": "SmartTEAM Live",
-      room: "sala",
-      "connected?": "¿conectado?",
-      class: "clase",
-      confidence: "confianza",
-      subscribers: "suscriptores",
-      "set room to [ROOM]": "establecer sala a [ROOM]",
-      reconnect: "reconectar",
-      disconnect: "desconectar",
-    },
-    "es-ES": {
-      "SmartTEAM Live": "SmartTEAM Live",
-      room: "sala",
-      "connected?": "¿conectado?",
-      class: "clase",
-      confidence: "confianza",
-      subscribers: "suscriptores",
-      "set room to [ROOM]": "establecer sala a [ROOM]",
+      "set room to [ROOM]": "fijar sala a [ROOM]",
       reconnect: "reconectar",
       disconnect: "desconectar",
     },
   };
 
-  if (Scratch.translate && Scratch.translate.setup) {
-    Scratch.translate.setup(translations);
+  function getLocale() {
+    // TurboWarp suele exponer Scratch.locale, pero hacemos fallback robusto.
+    const loc =
+      (typeof Scratch.locale === "string" && Scratch.locale) ||
+      (Scratch.translate &&
+        typeof Scratch.translate.getLocale === "function" &&
+        Scratch.translate.getLocale()) ||
+      (typeof navigator !== "undefined" && navigator.language) ||
+      "en";
+    return String(loc);
   }
 
-  function tr(str) {
-    return Scratch.translate ? Scratch.translate(str) : str;
+  function isSpanishLocale(locale) {
+    const l = String(locale || "").toLowerCase();
+    // cubre es, es-419, es-ES, es_AR, etc.
+    return l === "es" || l.startsWith("es-") || l.startsWith("es_");
+  }
+
+  function tr(key) {
+    const locale = getLocale();
+    const lang = isSpanishLocale(locale) ? "es" : "en";
+    const dict = STRINGS[lang] || STRINGS.en;
+
+    // Preferimos nuestro dict (porque Scratch.translate no trae traducción para esto aún).
+    if (dict && Object.prototype.hasOwnProperty.call(dict, key)) {
+      return dict[key];
+    }
+
+    // Fallback a Scratch.translate si existiera alguna traducción externa.
+    if (typeof Scratch.translate === "function") {
+      return Scratch.translate(key);
+    }
+
+    return key;
   }
 
   const DEFAULT_WS_BASE =
@@ -78,6 +82,19 @@
 
   // Backoff sequence (ms). Cap is handled by last value.
   const BACKOFF_MS = [1000, 2000, 3000, 5000];
+
+  /**
+   * Read a querystring param from a given search string ("?a=b") safely.
+   */
+  function getQueryParamFromSearch(search, name) {
+    try {
+      const params = new URLSearchParams(search || "");
+      const v = params.get(name);
+      return v == null ? "" : String(v);
+    } catch (e) {
+      return "";
+    }
+  }
 
   /**
    * Read a param from the extension script URL (document.currentScript.src).
@@ -148,6 +165,21 @@
     return Object.is(r, -0) ? 0 : r;
   }
 
+  /**
+   * Scratch.canFetch is designed around http/https permissions.
+   * For ws/wss URLs, check permissions using an equivalent http/https URL.
+   */
+  function toCanFetchUrl(wsUrl) {
+    try {
+      const u = new URL(wsUrl);
+      if (u.protocol === "wss:") u.protocol = "https:";
+      else if (u.protocol === "ws:") u.protocol = "http:";
+      return u.toString();
+    } catch (e) {
+      return "";
+    }
+  }
+
   class SmartteamLiveExtension {
     constructor() {
       // Internal state
@@ -167,14 +199,14 @@
       this._reconnectTimer = null;
       this._backoffIndex = 0;
 
-      // wsBase/room: from the extension script URL in sandboxed mode
+      // wsBase/room: ONLY from the extension script URL in sandboxed mode
       const wsBaseFromScript = getParamFromCurrentScript("wsBase");
       this._wsBase = normalizeWsBase(wsBaseFromScript);
 
       const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
       this._defaultRoom = roomFromScript || "";
 
-      // In sandboxed mode: only auto-connect if room is provided via script URL.
+      // Auto-connect ONLY if room is provided via script URL.
       if (roomFromScript) {
         this.setRoomInternal(roomFromScript, /*auto*/ true);
       } else {
@@ -220,7 +252,6 @@
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
-                // Default value shows the session room passed via script URL (if any).
                 defaultValue: this._defaultRoom || "ST-XXXXXXX",
               },
             },
@@ -358,10 +389,17 @@
         }
       }
 
-      // Permission check
+      // Permission check (use http/https equivalent for ws/wss)
+      const canFetchUrl = toCanFetchUrl(wsUrl);
+      if (!canFetchUrl) {
+        this._connected = false;
+        this._scheduleReconnect();
+        return;
+      }
+
       let allowed = false;
       try {
-        allowed = await Scratch.canFetch(wsUrl);
+        allowed = await Scratch.canFetch(canFetchUrl);
       } catch (e) {
         this._connected = false;
         this._scheduleReconnect();
@@ -375,7 +413,6 @@
       }
 
       try {
-        // eslint-disable-next-line extension/check-can-fetch
         const ws = new WebSocket(wsUrl);
         this._ws = ws;
 
