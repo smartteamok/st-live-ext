@@ -18,7 +18,7 @@
 
   const STRINGS = {
     en: {
-      "SmartTEAM Live": "SmartTEAM Live",
+      "SmartTEAM AI": "SmartTEAM AI",
       room: "room",
       "connected?": "connected?",
       class: "class",
@@ -29,7 +29,7 @@
       disconnect: "disconnect",
     },
     es: {
-      "SmartTEAM Live": "SmartTEAM En Vivo",
+      "SmartTEAM AI": "SmartTEAM IA",
       room: "sala",
       "connected?": "¿conectado?",
       class: "clase",
