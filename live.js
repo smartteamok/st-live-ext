@@ -3,13 +3,47 @@
 // Description: Read real-time AI signals from a SmartTEAM WebSocket room (currently gestures).
 // By: marianobat <https://scratch.mit.edu/users/marianobat/>
 // License: MPL-2.0
-// Manual testing:
-// https://turbowarp.org/editor?extension=http://localhost:8000/marianobat/live.js&room=ST-XXXX&wsBase=wss://smartteam-gesture-bridge.marianobat.workers.dev/ws
+// Manual testing (sandboxed):
+// https://turbowarp.org/editor?extension=https%3A%2F%2Flocalhost%3A8000%2Fmarianobat%2Flive.js%3Froom%3DST-XXXX%26wsBase%3Dwss%3A%2F%2Fsmartteam-gesture-bridge.marianobat.workers.dev%2Fws
+//
+// Notes:
+// - In sandboxed mode, the extension cannot reliably read the editor URL (?room=...).
+// - To provide a default room value, pass room via the extension script URL:
+//   live.js?room=ST-... (URL-encoded inside the editor's extension= parameter)
 
 (function (Scratch) {
   "use strict";
 
   if (!Scratch) return;
+
+  const translations = {
+    en: {
+      "SmartTEAM Live": "SmartTEAM Live",
+      room: "room",
+      "connected?": "connected?",
+      class: "class",
+      confidence: "confidence",
+      subscribers: "subscribers",
+      "set room to [ROOM]": "set room to [ROOM]",
+      reconnect: "reconnect",
+      disconnect: "disconnect",
+    },
+    es: {
+      "SmartTEAM Live": "SmartTEAM En Vivo",
+      room: "sala",
+      "connected?": "conectado?",
+      class: "clase",
+      confidence: "confianza",
+      subscribers: "suscriptores",
+      "set room to [ROOM]": "fijar sala a [ROOM]",
+      reconnect: "reconectar",
+      disconnect: "desconectar",
+    },
+  };
+
+  if (Scratch.translate && Scratch.translate.setup) {
+    Scratch.translate.setup(translations);
+  }
 
   const DEFAULT_WS_BASE =
     "wss://smartteam-gesture-bridge.marianobat.workers.dev/ws";
@@ -31,37 +65,8 @@
   }
 
   /**
-   * Read a querystring param from current page (window.location.search).
-   */
-  function getQueryParam(name) {
-    return getQueryParamFromSearch(window.location.search || "", name);
-  }
-
-  /**
-   * Room can appear in search or sometimes in hash.
-   * This function checks both.
-   */
-  function getRoomFromWindow() {
-    const fromSearch = getQueryParamFromSearch(window.location.search, "room");
-    if (fromSearch) return fromSearch;
-
-    const h = window.location.hash || "";
-    const qIndex = h.indexOf("?");
-    if (qIndex !== -1) {
-      const fromHashQuery = getQueryParamFromSearch(h.slice(qIndex), "room");
-      if (fromHashQuery) return fromHashQuery;
-    }
-    if (h.startsWith("#")) {
-      const fromHash = getQueryParamFromSearch(h.slice(1), "room");
-      if (fromHash) return fromHash;
-    }
-
-    return "";
-  }
-
-  /**
    * Read a param from the extension script URL (document.currentScript.src).
-   * This is a robust fallback if the editor URL params change after load.
+   * This is the most reliable way to receive parameters in sandboxed mode.
    */
   function getParamFromCurrentScript(name) {
     try {
@@ -139,7 +144,6 @@
       else if (u.protocol === "ws:") u.protocol = "http:";
       return u.toString();
     } catch (e) {
-      // If something is weird, just return empty so canFetch fails safe.
       return "";
     }
   }
@@ -154,32 +158,32 @@
       this._confidence = 0;
       this._subscribers = 0;
 
+      // Default room shown in the "set room to" block.
+      // In sandboxed mode we cannot reliably read the editor URL.
+      this._defaultRoom = "";
+
       // WebSocket + reconnect handling
       this._ws = null;
       this._shouldReconnect = false;
       this._reconnectTimer = null;
       this._backoffIndex = 0;
 
-      // Room probe (timing robustness)
-      this._roomProbeTimer = null;
-
-      // wsBase: from editor URL first, then from extension URL
-      const wsBaseFromEditor = getQueryParam("wsBase");
+      // wsBase/room: ONLY from the extension script URL in sandboxed mode
       const wsBaseFromScript = getParamFromCurrentScript("wsBase");
-      this._wsBase = normalizeWsBase(wsBaseFromEditor || wsBaseFromScript);
+      this._wsBase = normalizeWsBase(wsBaseFromScript);
 
-      // room: editor URL (search/hash), then extension URL
-      const roomFromEditor = normalizeRoom(getRoomFromWindow());
       const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
-      const urlRoom = roomFromEditor || roomFromScript;
+      this._defaultRoom = roomFromScript || "";
 
-      if (urlRoom) {
-        this.setRoomInternal(urlRoom, /*auto*/ true);
+      // Do NOT auto-connect in sandboxed unless the room is provided via script URL.
+      // (You can still connect by using the "set room to" block.)
+      if (roomFromScript) {
+        this.setRoomInternal(roomFromScript, /*auto*/ true);
       } else {
-        // If room not available yet, probe briefly (covers URL normalization timing).
         this._connected = false;
-        this._startRoomProbe();
       }
+
+      this._ensureClassMonitor();
     }
 
     getInfo() {
@@ -200,7 +204,7 @@
           {
             opcode: "getGesture",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("gesture"),
+            text: Scratch.translate("class"),
           },
           {
             opcode: "getConfidence",
@@ -220,7 +224,7 @@
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
-                defaultValue: Scratch.translate("ST-XXXXXXX"),
+                defaultValue: this._defaultRoom || "ST-XXXXXXX",
               },
             },
           },
@@ -282,55 +286,11 @@
     disconnect() {
       this._shouldReconnect = false;
       this._clearReconnectTimer();
-      this._stopRoomProbe();
       this._closeWs("manual disconnect");
       this._connected = false;
     }
 
     // --- Internal logic ---
-
-    _startRoomProbe() {
-      // Try for ~5 seconds to catch cases where URL params appear after extension executes.
-      let tries = 0;
-      const maxTries = 20; // 20 * 250ms = 5s
-      const intervalMs = 250;
-
-      if (this._roomProbeTimer) return;
-
-      this._roomProbeTimer = setInterval(() => {
-        tries += 1;
-
-        if (this._room) {
-          this._stopRoomProbe();
-          return;
-        }
-
-        const roomFromEditor = normalizeRoom(getRoomFromWindow());
-        const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
-        const found = roomFromEditor || roomFromScript;
-
-        if (found) {
-          this._stopRoomProbe();
-          this.setRoomInternal(found, /*auto*/ true);
-          return;
-        }
-
-        if (tries >= maxTries) {
-          this._stopRoomProbe();
-        }
-      }, intervalMs);
-    }
-
-    _stopRoomProbe() {
-      if (this._roomProbeTimer) {
-        try {
-          clearInterval(this._roomProbeTimer);
-        } catch (e) {
-          // ignore
-        }
-        this._roomProbeTimer = null;
-      }
-    }
 
     setRoomInternal(room, auto) {
       if (!room) {
@@ -344,6 +304,9 @@
         }
         return;
       }
+
+      // Keep default in sync for convenience (future blocks dragged out)
+      this._defaultRoom = room;
 
       // If unchanged, do nothing.
       if (room === this._room && this._ws) return;
@@ -481,7 +444,6 @@
     _scheduleReconnect() {
       if (!this._shouldReconnect) return;
       if (!this._room) return;
-
       if (this._reconnectTimer) return;
 
       const idx = Math.min(this._backoffIndex, BACKOFF_MS.length - 1);
@@ -509,6 +471,53 @@
           // ignore
         }
         this._reconnectTimer = null;
+      }
+    }
+
+    _ensureClassMonitor() {
+      const runtime = Scratch.vm && Scratch.vm.runtime;
+      if (!runtime) return;
+
+      const monitorId = "smartteamlive:class";
+      const monitorState = runtime._monitorState;
+      if (monitorState && monitorState[monitorId]) return;
+
+      const target =
+        typeof runtime.getTargetForStage === "function"
+          ? runtime.getTargetForStage()
+          : typeof runtime.getEditingTarget === "function"
+          ? runtime.getEditingTarget()
+          : null;
+
+      const monitor = {
+        id: monitorId,
+        opcode: "getGesture",
+        params: {},
+        targetId: target && target.id ? target.id : null,
+        spriteName:
+          target && target.sprite && target.sprite.name
+            ? target.sprite.name
+            : null,
+        mode: "default",
+        value: "",
+        visible: true,
+      };
+
+      try {
+        if (typeof runtime.requestAddMonitor === "function") {
+          runtime.requestAddMonitor(monitor);
+          return;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      try {
+        if (typeof runtime._monitorBlock === "function") {
+          runtime._monitorBlock(monitor);
+        }
+      } catch (e) {
+        // ignore
       }
     }
   }
