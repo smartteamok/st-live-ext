@@ -16,6 +16,8 @@
 
   if (!Scratch) return;
 
+  // Provide in-extension translations for immediate UX.
+  // TurboWarp commonly uses es-419 for Latin American Spanish.
   const translations = {
     en: {
       "SmartTEAM Live": "SmartTEAM Live",
@@ -29,13 +31,35 @@
       disconnect: "disconnect",
     },
     es: {
-      "SmartTEAM Live": "SmartTEAM En Vivo",
+      "SmartTEAM Live": "SmartTEAM Live",
       room: "sala",
-      "connected?": "conectado?",
+      "connected?": "¿conectado?",
       class: "clase",
       confidence: "confianza",
       subscribers: "suscriptores",
-      "set room to [ROOM]": "fijar sala a [ROOM]",
+      "set room to [ROOM]": "establecer sala a [ROOM]",
+      reconnect: "reconectar",
+      disconnect: "desconectar",
+    },
+    "es-419": {
+      "SmartTEAM Live": "SmartTEAM Live",
+      room: "sala",
+      "connected?": "¿conectado?",
+      class: "clase",
+      confidence: "confianza",
+      subscribers: "suscriptores",
+      "set room to [ROOM]": "establecer sala a [ROOM]",
+      reconnect: "reconectar",
+      disconnect: "desconectar",
+    },
+    "es-ES": {
+      "SmartTEAM Live": "SmartTEAM Live",
+      room: "sala",
+      "connected?": "¿conectado?",
+      class: "clase",
+      confidence: "confianza",
+      subscribers: "suscriptores",
+      "set room to [ROOM]": "establecer sala a [ROOM]",
       reconnect: "reconectar",
       disconnect: "desconectar",
     },
@@ -45,24 +69,15 @@
     Scratch.translate.setup(translations);
   }
 
+  function tr(str) {
+    return Scratch.translate ? Scratch.translate(str) : str;
+  }
+
   const DEFAULT_WS_BASE =
     "wss://smartteam-gesture-bridge.marianobat.workers.dev/ws";
 
   // Backoff sequence (ms). Cap is handled by last value.
   const BACKOFF_MS = [1000, 2000, 3000, 5000];
-
-  /**
-   * Read a querystring param from a given search string ("?a=b") safely.
-   */
-  function getQueryParamFromSearch(search, name) {
-    try {
-      const params = new URLSearchParams(search || "");
-      const v = params.get(name);
-      return v == null ? "" : String(v);
-    } catch (e) {
-      return "";
-    }
-  }
 
   /**
    * Read a param from the extension script URL (document.currentScript.src).
@@ -133,21 +148,6 @@
     return Object.is(r, -0) ? 0 : r;
   }
 
-  /**
-   * Scratch.canFetch is designed around http/https permissions.
-   * For ws/wss URLs, check permissions using an equivalent http/https URL.
-   */
-  function toCanFetchUrl(wsUrl) {
-    try {
-      const u = new URL(wsUrl);
-      if (u.protocol === "wss:") u.protocol = "https:";
-      else if (u.protocol === "ws:") u.protocol = "http:";
-      return u.toString();
-    } catch (e) {
-      return "";
-    }
-  }
-
   class SmartteamLiveExtension {
     constructor() {
       // Internal state
@@ -159,7 +159,6 @@
       this._subscribers = 0;
 
       // Default room shown in the "set room to" block.
-      // In sandboxed mode we cannot reliably read the editor URL.
       this._defaultRoom = "";
 
       // WebSocket + reconnect handling
@@ -168,62 +167,60 @@
       this._reconnectTimer = null;
       this._backoffIndex = 0;
 
-      // wsBase/room: ONLY from the extension script URL in sandboxed mode
+      // wsBase/room: from the extension script URL in sandboxed mode
       const wsBaseFromScript = getParamFromCurrentScript("wsBase");
       this._wsBase = normalizeWsBase(wsBaseFromScript);
 
       const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
       this._defaultRoom = roomFromScript || "";
 
-      // Do NOT auto-connect in sandboxed unless the room is provided via script URL.
-      // (You can still connect by using the "set room to" block.)
+      // In sandboxed mode: only auto-connect if room is provided via script URL.
       if (roomFromScript) {
         this.setRoomInternal(roomFromScript, /*auto*/ true);
       } else {
         this._connected = false;
       }
-
-      this._ensureClassMonitor();
     }
 
     getInfo() {
       return {
         id: "smartteamlive",
-        name: Scratch.translate("SmartTEAM Live"),
+        name: tr("SmartTEAM Live"),
         blocks: [
           {
             opcode: "getRoom",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("room"),
+            text: tr("room"),
           },
           {
             opcode: "isConnected",
             blockType: Scratch.BlockType.BOOLEAN,
-            text: Scratch.translate("connected?"),
+            text: tr("connected?"),
           },
           {
             opcode: "getGesture",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("class"),
+            text: tr("class"),
           },
           {
             opcode: "getConfidence",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("confidence"),
+            text: tr("confidence"),
           },
           {
             opcode: "getSubscribers",
             blockType: Scratch.BlockType.REPORTER,
-            text: Scratch.translate("subscribers"),
+            text: tr("subscribers"),
           },
           "---",
           {
             opcode: "setRoom",
             blockType: Scratch.BlockType.COMMAND,
-            text: Scratch.translate("set room to [ROOM]"),
+            text: tr("set room to [ROOM]"),
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
+                // Default value shows the session room passed via script URL (if any).
                 defaultValue: this._defaultRoom || "ST-XXXXXXX",
               },
             },
@@ -231,12 +228,12 @@
           {
             opcode: "reconnect",
             blockType: Scratch.BlockType.COMMAND,
-            text: Scratch.translate("reconnect"),
+            text: tr("reconnect"),
           },
           {
             opcode: "disconnect",
             blockType: Scratch.BlockType.COMMAND,
-            text: Scratch.translate("disconnect"),
+            text: tr("disconnect"),
           },
         ],
       };
@@ -305,7 +302,7 @@
         return;
       }
 
-      // Keep default in sync for convenience (future blocks dragged out)
+      // Keep default in sync for convenience.
       this._defaultRoom = room;
 
       // If unchanged, do nothing.
@@ -361,17 +358,10 @@
         }
       }
 
-      // Permission check (use http/https equivalent for ws/wss)
-      const canFetchUrl = toCanFetchUrl(wsUrl);
-      if (!canFetchUrl) {
-        this._connected = false;
-        this._scheduleReconnect();
-        return;
-      }
-
+      // Permission check
       let allowed = false;
       try {
-        allowed = await Scratch.canFetch(canFetchUrl);
+        allowed = await Scratch.canFetch(wsUrl);
       } catch (e) {
         this._connected = false;
         this._scheduleReconnect();
@@ -385,6 +375,7 @@
       }
 
       try {
+        // eslint-disable-next-line extension/check-can-fetch
         const ws = new WebSocket(wsUrl);
         this._ws = ws;
 
@@ -471,53 +462,6 @@
           // ignore
         }
         this._reconnectTimer = null;
-      }
-    }
-
-    _ensureClassMonitor() {
-      const runtime = Scratch.vm && Scratch.vm.runtime;
-      if (!runtime) return;
-
-      const monitorId = "smartteamlive:class";
-      const monitorState = runtime._monitorState;
-      if (monitorState && monitorState[monitorId]) return;
-
-      const target =
-        typeof runtime.getTargetForStage === "function"
-          ? runtime.getTargetForStage()
-          : typeof runtime.getEditingTarget === "function"
-          ? runtime.getEditingTarget()
-          : null;
-
-      const monitor = {
-        id: monitorId,
-        opcode: "getGesture",
-        params: {},
-        targetId: target && target.id ? target.id : null,
-        spriteName:
-          target && target.sprite && target.sprite.name
-            ? target.sprite.name
-            : null,
-        mode: "default",
-        value: "",
-        visible: true,
-      };
-
-      try {
-        if (typeof runtime.requestAddMonitor === "function") {
-          runtime.requestAddMonitor(monitor);
-          return;
-        }
-      } catch (e) {
-        // ignore
-      }
-
-      try {
-        if (typeof runtime._monitorBlock === "function") {
-          runtime._monitorBlock(monitor);
-        }
-      } catch (e) {
-        // ignore
       }
     }
   }
