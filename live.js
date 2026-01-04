@@ -16,65 +16,37 @@
 
   if (!Scratch) return;
 
-  const STRINGS = {
+  const translations = {
     en: {
-      "SmartTEAM AI": "SmartTEAM AI",
+      "SmartTEAM Live": "SmartTEAM Live",
       room: "room",
       "connected?": "connected?",
+      model: "model",
       class: "class",
       confidence: "confidence",
       subscribers: "subscribers",
       "set room to [ROOM]": "set room to [ROOM]",
+      "set model to [MODEL]": "set model to [MODEL]",
       reconnect: "reconnect",
       disconnect: "disconnect",
     },
     es: {
-      "SmartTEAM AI": "SmartTEAM IA",
+      "SmartTEAM Live": "SmartTEAM En Vivo",
       room: "sala",
-      "connected?": "¿conectado?",
+      "connected?": "conectado?",
+      model: "modelo",
       class: "clase",
       confidence: "confianza",
       subscribers: "suscriptores",
       "set room to [ROOM]": "fijar sala a [ROOM]",
+      "set model to [MODEL]": "fijar modelo a [MODEL]",
       reconnect: "reconectar",
       disconnect: "desconectar",
     },
   };
 
-  function getLocale() {
-    // TurboWarp suele exponer Scratch.locale, pero hacemos fallback robusto.
-    const loc =
-      (typeof Scratch.locale === "string" && Scratch.locale) ||
-      (Scratch.translate &&
-        typeof Scratch.translate.getLocale === "function" &&
-        Scratch.translate.getLocale()) ||
-      (typeof navigator !== "undefined" && navigator.language) ||
-      "en";
-    return String(loc);
-  }
-
-  function isSpanishLocale(locale) {
-    const l = String(locale || "").toLowerCase();
-    // cubre es, es-419, es-ES, es_AR, etc.
-    return l === "es" || l.startsWith("es-") || l.startsWith("es_");
-  }
-
-  function tr(key) {
-    const locale = getLocale();
-    const lang = isSpanishLocale(locale) ? "es" : "en";
-    const dict = STRINGS[lang] || STRINGS.en;
-
-    // Preferimos nuestro dict (porque Scratch.translate no trae traducción para esto aún).
-    if (dict && Object.prototype.hasOwnProperty.call(dict, key)) {
-      return dict[key];
-    }
-
-    // Fallback a Scratch.translate si existiera alguna traducción externa.
-    if (typeof Scratch.translate === "function") {
-      return Scratch.translate(key);
-    }
-
-    return key;
+  if (Scratch.translate && Scratch.translate.setup) {
+    Scratch.translate.setup(translations);
   }
 
   const DEFAULT_WS_BASE =
@@ -82,6 +54,8 @@
 
   // Backoff sequence (ms). Cap is handled by last value.
   const BACKOFF_MS = [1000, 2000, 3000, 5000];
+
+  const ALLOWED_MODELS = ["hands", "text", "image", "face", "pose"];
 
   /**
    * Read a querystring param from a given search string ("?a=b") safely.
@@ -139,6 +113,15 @@
   }
 
   /**
+   * Normalize model id. If invalid, return fallback.
+   */
+  function normalizeModelId(modelId, fallback) {
+    const raw = String(modelId || "").trim().toLowerCase();
+    if (ALLOWED_MODELS.indexOf(raw) !== -1) return raw;
+    return fallback || "";
+  }
+
+  /**
    * Safe parse JSON. Returns null on failure.
    */
   function safeJsonParse(text) {
@@ -189,8 +172,12 @@
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
+      this._modelId = "hands";
+      this._lastModelId = "";
+      this._scores = null;
 
       // Default room shown in the "set room to" block.
+      // In sandboxed mode we cannot reliably read the editor URL.
       this._defaultRoom = "";
 
       // WebSocket + reconnect handling
@@ -206,65 +193,84 @@
       const roomFromScript = normalizeRoom(getParamFromCurrentScript("room"));
       this._defaultRoom = roomFromScript || "";
 
-      // Auto-connect ONLY if room is provided via script URL.
+      // Do NOT auto-connect in sandboxed unless the room is provided via script URL.
+      // (You can still connect by using the "set room to" block.)
       if (roomFromScript) {
         this.setRoomInternal(roomFromScript, /*auto*/ true);
       } else {
         this._connected = false;
       }
+
+      this._ensureClassMonitor();
     }
 
     getInfo() {
       return {
         id: "smartteamlive",
-        name: tr("SmartTEAM Live"),
+        name: Scratch.translate("SmartTEAM Live"),
         blocks: [
           {
             opcode: "getRoom",
             blockType: Scratch.BlockType.REPORTER,
-            text: tr("room"),
+            text: Scratch.translate("room"),
           },
           {
             opcode: "isConnected",
             blockType: Scratch.BlockType.BOOLEAN,
-            text: tr("connected?"),
+            text: Scratch.translate("connected?"),
+          },
+          {
+            opcode: "getModel",
+            blockType: Scratch.BlockType.REPORTER,
+            text: Scratch.translate("model"),
           },
           {
             opcode: "getGesture",
             blockType: Scratch.BlockType.REPORTER,
-            text: tr("class"),
+            text: Scratch.translate("class"),
           },
           {
             opcode: "getConfidence",
             blockType: Scratch.BlockType.REPORTER,
-            text: tr("confidence"),
+            text: Scratch.translate("confidence"),
           },
           {
             opcode: "getSubscribers",
             blockType: Scratch.BlockType.REPORTER,
-            text: tr("subscribers"),
+            text: Scratch.translate("subscribers"),
           },
           "---",
           {
             opcode: "setRoom",
             blockType: Scratch.BlockType.COMMAND,
-            text: tr("set room to [ROOM]"),
+            text: Scratch.translate("set room to [ROOM]"),
             arguments: {
               ROOM: {
                 type: Scratch.ArgumentType.STRING,
-                defaultValue: this._defaultRoom || "ST-XXXXXXX",
+                defaultValue: this._defaultRoom || "ST-XXXX",
+              },
+            },
+          },
+          {
+            opcode: "setModel",
+            blockType: Scratch.BlockType.COMMAND,
+            text: Scratch.translate("set model to [MODEL]"),
+            arguments: {
+              MODEL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: this._modelId || "hands",
               },
             },
           },
           {
             opcode: "reconnect",
             blockType: Scratch.BlockType.COMMAND,
-            text: tr("reconnect"),
+            text: Scratch.translate("reconnect"),
           },
           {
             opcode: "disconnect",
             blockType: Scratch.BlockType.COMMAND,
-            text: tr("disconnect"),
+            text: Scratch.translate("disconnect"),
           },
         ],
       };
@@ -284,6 +290,10 @@
       return this._gesture || "";
     }
 
+    getModel() {
+      return this._modelId || "hands";
+    }
+
     getConfidence() {
       return round2(toFiniteNumber(this._confidence, 0));
     }
@@ -297,6 +307,16 @@
     setRoom(args) {
       const room = normalizeRoom(args.ROOM);
       this.setRoomInternal(room, /*auto*/ false);
+    }
+
+    setModel(args) {
+      const modelId = normalizeModelId(args.MODEL, "hands");
+      if (modelId === this._modelId) return;
+      this._modelId = modelId;
+      this._gesture = "";
+      this._confidence = 0;
+      this._scores = null;
+      this._lastModelId = "";
     }
 
     reconnect() {
@@ -333,7 +353,7 @@
         return;
       }
 
-      // Keep default in sync for convenience.
+      // Keep default in sync for convenience (future blocks dragged out)
       this._defaultRoom = room;
 
       // If unchanged, do nothing.
@@ -345,6 +365,8 @@
       this._gesture = "";
       this._confidence = 0;
       this._subscribers = 0;
+      this._scores = null;
+      this._lastModelId = "";
 
       // (Re)connect
       this._backoffIndex = 0;
@@ -425,11 +447,33 @@
           const msg = safeJsonParse(evt.data);
           if (!msg || typeof msg !== "object") return;
 
-          if (msg.type === "gesture") {
+          if (msg.type === "prediction") {
+            const incomingModelId = normalizeModelId(msg.modelId, "");
+            this._lastModelId = incomingModelId || "";
+            if (!incomingModelId || incomingModelId !== this._modelId) return;
+
+            const label =
+              typeof msg.label === "string"
+                ? msg.label
+                : typeof msg.gesture === "string"
+                ? msg.gesture
+                : "";
+            const conf = toFiniteNumber(
+              msg.confidence,
+              toFiniteNumber(msg.score, 0)
+            );
+            this._gesture = label;
+            this._confidence = conf;
+            this._scores =
+              msg.scores && typeof msg.scores === "object" ? msg.scores : null;
+          } else if (msg.type === "gesture") {
+            if (this._modelId !== "hands") return;
             const label = typeof msg.label === "string" ? msg.label : "";
             const conf = toFiniteNumber(msg.confidence, 0);
             this._gesture = label;
             this._confidence = conf;
+            this._lastModelId = "hands";
+            this._scores = null;
           } else if (msg.type === "presence") {
             const subs = toFiniteNumber(msg.subscribers, this._subscribers);
             this._subscribers = subs;
@@ -499,6 +543,53 @@
           // ignore
         }
         this._reconnectTimer = null;
+      }
+    }
+
+    _ensureClassMonitor() {
+      const runtime = Scratch.vm && Scratch.vm.runtime;
+      if (!runtime) return;
+
+      const monitorId = "smartteamlive:class";
+      const monitorState = runtime._monitorState;
+      if (monitorState && monitorState[monitorId]) return;
+
+      const target =
+        typeof runtime.getTargetForStage === "function"
+          ? runtime.getTargetForStage()
+          : typeof runtime.getEditingTarget === "function"
+          ? runtime.getEditingTarget()
+          : null;
+
+      const monitor = {
+        id: monitorId,
+        opcode: "getGesture",
+        params: {},
+        targetId: target && target.id ? target.id : null,
+        spriteName:
+          target && target.sprite && target.sprite.name
+            ? target.sprite.name
+            : null,
+        mode: "default",
+        value: "",
+        visible: true,
+      };
+
+      try {
+        if (typeof runtime.requestAddMonitor === "function") {
+          runtime.requestAddMonitor(monitor);
+          return;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      try {
+        if (typeof runtime._monitorBlock === "function") {
+          runtime._monitorBlock(monitor);
+        }
+      } catch (e) {
+        // ignore
       }
     }
   }
